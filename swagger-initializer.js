@@ -6,6 +6,7 @@ window.onload = function() {
     url: "https://petstore.swagger.io/v2/swagger.json",
     dom_id: '#swagger-ui',
     deepLinking: true,
+    queryConfigEnabled: true,
     presets: [
       SwaggerUIBundle.presets.apis,
       SwaggerUIStandalonePreset
