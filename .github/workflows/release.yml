@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    branches: ["master"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: tibdex/github-app-token@v1
+      id: generate-token
+      with:
+        app_id: ${{ secrets.APP_ID }}
+        private_key: ${{ secrets.APP_PRIVATE_KEY }}
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Set up Java 11
+      uses: actions/setup-java@v4
+      with:
+        java-version: 11
+        distribution: temurin
+        server-id: central
+        server-username: MAVEN_USERNAME
+        server-password: MAVEN_PASSWORD
+        gpg-private-key: ${{ secrets.OSSRH_GPG_PRIVATE_KEY }}
+
+    - name: Cache local Maven repository
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2/repository
+        key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+        restore-keys: |
+          ${{ runner.os }}-maven-
+
+    - name: Run pre release script
+      id: preRelease
+      run: |
+        export MY_POM_VERSION=`mvn -q -Dexec.executable="echo" -Dexec.args='${projects.version}' --non-recursive org.codehaus.mojo:exec-maven-plugin:1.3.1:exec`
+        if [[ $MY_POM_VERSION =~ ^.*SNAPSHOT$ ]];
+        then
+          echo "not releasing snapshot version: " ${MY_POM_VERSION}
+          echo "RELEASE_OK=no" >> $GITHUB_ENV
+        else
+          . ./CI/pre-release.sh
+          echo "RELEASE_OK=yes" >> $GITHUB_ENV
+        fi
+        echo "SC_VERSION=$SC_VERSION" >> $GITHUB_ENV
+        echo "SC_NEXT_VERSION=$SC_NEXT_VERSION" >> $GITHUB_ENV
+        echo "SC_LAST_RELEASE=$SC_LAST_RELEASE" >> $GITHUB_ENV
+
+    - name: configure git user email
+      run: |
+        git config --global user.email "action@github.com"
+        git config --global user.name "GitHub Action"
+        git config --global hub.protocol https
+        git remote set-url origin https://${{ secrets.GITHUB_TOKEN }}:x-oauth-basic@github.com/swagger-api/validator-badge.git
+
+    - name: Run maven deploy/release
+      if: env.RELEASE_OK == 'yes'
+      run: |
+        mvn --no-transfer-progress -B -Prelease deploy
+
+    - name: docker login
+      run: |
+        docker login --username=${{ secrets.DOCKERHUB_SB_USERNAME }} --password=${{ secrets.DOCKERHUB_SB_PASSWORD }}
+        set -e
+
+    - name: Docker build and push
+      id: docker_build_push
+      if: env.RELEASE_OK == 'yes'
+      run: |
+        . ./CI/docker-release.sh
+
+    - name: Run post release script
+      id: postRelease
+      if: env.RELEASE_OK == 'yes'
+      run: |
+        . ./CI/post-release.sh
+
+    - name: Create Next Snapshot Pull Request
+      uses: peter-evans/create-pull-request@v4
+      if: env.RELEASE_OK == 'yes'
+      with:
+        token: ${{ steps.generate-token.outputs.token }}
+        commit-message: bump snapshot ${{ env.SC_NEXT_VERSION }}-SNAPSHOT
+        title: 'bump snapshot ${{ env.SC_NEXT_VERSION }}-SNAPSHOT'
+        branch: bump-snap-${{ env.SC_NEXT_VERSION }}-SNAPSHOT
+
+    # NEW DEPLOYMENT (Replaces Rancher)
+    - name: Configure AWS Credentials
+      if: env.RELEASE_OK == 'yes'
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        audience: sts.amazonaws.com
+        aws-region: us-east-1
+        role-to-assume: arn:aws:iam::886148526908:role/CloudformationBuild
+
+    - name: Update kubeconfig
+      if: env.RELEASE_OK == 'yes'
+      run: |
+        aws eks update-kubeconfig \
+          --name eks-prod-swagger-oss-cluster-tf \
+          --region us-east-1 \
+          --role-arn arn:aws:iam::886148526908:role/CloudformationBuild
+
+    - name: Deploy to Kubernetes
+      if: env.RELEASE_OK == 'yes'
+      run: |
+        IMAGE="swaggerapi/swagger-validator-v2:v${{ env.SC_VERSION }}"
+        
+        echo "Deploying image: $IMAGE"
+
+        kubectl set image daemonset/swagger-validator-v2 \
+          swagger-validator-v2=$IMAGE \
+          -n swagger-oss
+
+        kubectl rollout status daemonset/swagger-validator-v2 -n swagger-oss
+
+    env:
+      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+      MAVEN_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+      MAVEN_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SC_VERSION:
+      SC_NEXT_VERSION:
+      GPG_PRIVATE_KEY: ${{ secrets.OSSRH_GPG_PRIVATE_KEY }}
+      GPG_PASSPHRASE: ${{ secrets.OSSRH_GPG_PRIVATE_PASSPHRASE }}
+      GRADLE_PUBLISH_KEY: ${{ secrets.GRADLE_PUBLISH_KEY }}
+      GRADLE_PUBLISH_SECRET: ${{ secrets.GRADLE_PUBLISH_SECRET }}
