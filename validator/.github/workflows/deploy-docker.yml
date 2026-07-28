@@ -1,0 +1,46 @@
+name: Deploy Docker
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: tag/version to deploy
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          audience: sts.amazonaws.com
+          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::886148526908:role/CloudformationBuild
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name eks-prod-swagger-oss-cluster-tf \
+            --region us-east-1 \
+            --role-arn arn:aws:iam::886148526908:role/CloudformationBuild
+
+      - name: Deploy to Kubernetes
+        run: |
+          IMAGE="swaggerapi/swagger-validator-v2:v${{ github.event.inputs.tag }}"
+          
+          echo "Deploying image: $IMAGE"
+
+          kubectl set image daemonset/swagger-validator-v2 \
+            swagger-validator-v2=$IMAGE \
+            -n swagger-oss
+
+          kubectl rollout status daemonset/swagger-validator-v2 -n swagger-oss
