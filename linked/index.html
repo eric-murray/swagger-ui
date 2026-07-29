@@ -16,7 +16,9 @@
     <script>
       window.onload = function() {
         window.ui = SwaggerUIBundle({
-          spec: {"openapi":"3.0.3","info":{"title":"Demo API","version":"1.0.0"},"paths":{}},
+          spec:
+            {"openapi":"3.0.3","info":{"title":"Demo API","version":"1.0.0"},"paths":{}}
+            ,
           dom_id: '#swagger-ui',
           deepLinking: true,
           presets: [
